@@ -11,8 +11,13 @@ import {
   Env,
   withRetry,
 } from './index.js';
-import { createWriteStream } from 'fs';
+import { createReadStream, createWriteStream } from 'fs';
 import { createLogger } from './logger.js';
+import { parser } from 'stream-json';
+import { streamArray } from 'stream-json/streamers/StreamArray.js';
+import { streamObject } from 'stream-json/streamers/StreamObject.js';
+import { pick } from 'stream-json/filters/Pick.js';
+import { chain } from 'stream-chain';
 
 const logger = createLogger('anime-database');
 
@@ -745,54 +750,59 @@ export class AnimeDatabase {
 
   private async loadFribbMappings(): Promise<void> {
     const start = Date.now();
-    const fileContents = await this.readLocalFile(
-      DATA_SOURCES.fribbMappings.filePath
-    );
-    if (!fileContents)
+    const filePath = DATA_SOURCES.fribbMappings.filePath;
+    
+    if (!(await this.fileExists(filePath))) {
       throw new Error(DATA_SOURCES.fribbMappings.name + ' file not found');
-
-    const data = JSON.parse(fileContents);
-    if (!Array.isArray(data))
-      throw new Error(
-        DATA_SOURCES.fribbMappings.name + ' data must be an array'
-      );
-
-    const validEntries = this.validateEntries(data, validateMappingEntry);
+    }
 
     const newMappingsById: MappingIdMap = new Map();
-
     for (const idType of ID_TYPES) {
       newMappingsById.set(idType, new Map());
     }
 
-    for (const entry of validEntries) {
-      for (const idType of ID_TYPES) {
-        const idValue = entry[idType];
-        if (idValue !== undefined && idValue !== null) {
-          const existingEntry = newMappingsById.get(idType)?.get(idValue);
-          if (!existingEntry) {
-            newMappingsById.get(idType)?.set(idValue, entry);
+    let validCount = 0;
+
+    await new Promise<void>((resolve, reject) => {
+      const pipeline = chain([
+        createReadStream(filePath),
+        parser(),
+        streamArray(),
+      ]);
+
+      pipeline.on('data', ({ value }: { value: unknown }) => {
+        const entry = validateMappingEntry(value);
+        if (entry) {
+          validCount++;
+          for (const idType of ID_TYPES) {
+            const idValue = entry[idType];
+            if (idValue !== undefined && idValue !== null) {
+              const existingEntry = newMappingsById.get(idType)?.get(idValue);
+              if (!existingEntry) {
+                newMappingsById.get(idType)?.set(idValue, entry);
+              }
+            }
           }
         }
-      }
-    }
+      });
+
+      pipeline.on('end', () => resolve());
+      pipeline.on('error', (err: Error) => reject(err));
+    });
+
     this.dataStore.fribbMappingsById = newMappingsById;
     logger.info(
-      `[${DATA_SOURCES.fribbMappings.name}] Loaded and indexed ${validEntries.length} valid entries in ${getTimeTakenSincePoint(start)}`
+      `[${DATA_SOURCES.fribbMappings.name}] Loaded and indexed ${validCount} valid entries in ${getTimeTakenSincePoint(start)}`
     );
   }
 
   private async loadManamiDb(): Promise<void> {
     const start = Date.now();
-    const fileContents = await this.readLocalFile(DATA_SOURCES.manami.filePath);
-    if (!fileContents)
+    const filePath = DATA_SOURCES.manami.filePath;
+    
+    if (!(await this.fileExists(filePath))) {
       throw new Error(DATA_SOURCES.manami.name + ' file not found');
-
-    const data = JSON.parse(fileContents);
-    if (!Array.isArray(data.data))
-      throw new Error(DATA_SOURCES.manami.name + ' data must be an array');
-
-    const validEntries = this.validateEntries(data.data, validateManamiEntry);
+    }
 
     const newManamiById: ManamiIdMap = new Map();
     const idTypes = Object.keys(extractIdFromUrl) as Exclude<
@@ -804,32 +814,51 @@ export class AnimeDatabase {
       newManamiById.set(idType, new Map());
     }
 
-    for (const entry of validEntries) {
-      for (const sourceUrl of entry.sources) {
-        for (const idType of idTypes) {
-          const idExtractor = extractIdFromUrl[idType];
-          if (idExtractor) {
-            const idValue = idExtractor(sourceUrl);
-            if (idValue) {
-              const existingEntry = newManamiById.get(idType)?.get(idValue);
-              if (!existingEntry) {
-                newManamiById
-                  .get(idType)
-                  ?.set(
-                    idValue,
-                    Env.ANIME_DB_LEVEL_OF_DETAIL === 'required'
-                      ? this.minimiseManamiEntry(entry)
-                      : entry
-                  );
+    let validCount = 0;
+
+    await new Promise<void>((resolve, reject) => {
+      const pipeline = chain([
+        createReadStream(filePath),
+        parser(),
+        pick({ filter: 'data' }),
+        streamArray(),
+      ]);
+
+      pipeline.on('data', ({ value }: { value: unknown }) => {
+        const entry = validateManamiEntry(value);
+        if (entry) {
+          validCount++;
+          for (const sourceUrl of entry.sources) {
+            for (const idType of idTypes) {
+              const idExtractor = extractIdFromUrl[idType];
+              if (idExtractor) {
+                const idValue = idExtractor(sourceUrl);
+                if (idValue) {
+                  const existingEntry = newManamiById.get(idType)?.get(idValue);
+                  if (!existingEntry) {
+                    newManamiById
+                      .get(idType)
+                      ?.set(
+                        idValue,
+                        Env.ANIME_DB_LEVEL_OF_DETAIL === 'required'
+                          ? this.minimiseManamiEntry(entry)
+                          : entry
+                      );
+                  }
+                }
               }
             }
           }
         }
-      }
-    }
+      });
+
+      pipeline.on('end', () => resolve());
+      pipeline.on('error', (err: Error) => reject(err));
+    });
+
     this.dataStore.manamiById = newManamiById;
     logger.info(
-      `[${DATA_SOURCES.manami.name}] Loaded and indexed ${validEntries.length} valid entries in ${getTimeTakenSincePoint(start)}`
+      `[${DATA_SOURCES.manami.name}] Loaded and indexed ${validCount} valid entries in ${getTimeTakenSincePoint(start)}`
     );
   }
 
@@ -843,87 +872,111 @@ export class AnimeDatabase {
 
   private async loadKitsuImdbMapping(): Promise<void> {
     const start = Date.now();
-    const fileContents = await this.readLocalFile(
-      DATA_SOURCES.kitsuImdb.filePath
-    );
-    if (!fileContents)
+    const filePath = DATA_SOURCES.kitsuImdb.filePath;
+    
+    if (!(await this.fileExists(filePath))) {
       throw new Error(DATA_SOURCES.kitsuImdb.name + ' file not found');
-
-    const data = JSON.parse(fileContents);
-
-    // Validate each entry
-    this.dataStore.kitsuById = new Map();
-    for (const [kitsuId, kitsuEntry] of Object.entries(data)) {
-      const validated = validateKitsuEntry(kitsuEntry);
-      if (validated !== null) {
-        this.dataStore.kitsuById.set(Number(kitsuId), validated);
-      } else {
-        logger.warn(
-          `[${DATA_SOURCES.kitsuImdb.name}] Skipping invalid entry for kitsuId ${kitsuId}`
-        );
-      }
     }
+
+    const newKitsuById: KitsuIdMap = new Map();
+
+    await new Promise<void>((resolve, reject) => {
+      const pipeline = chain([
+        createReadStream(filePath),
+        parser(),
+        streamObject(),
+      ]);
+
+      pipeline.on('data', ({ key, value }: { key: string; value: unknown }) => {
+        const validated = validateKitsuEntry(value);
+        if (validated !== null) {
+          newKitsuById.set(Number(key), validated);
+        } else {
+          logger.warn(
+            `[${DATA_SOURCES.kitsuImdb.name}] Skipping invalid entry for kitsuId ${key}`
+          );
+        }
+      });
+
+      pipeline.on('end', () => resolve());
+      pipeline.on('error', (err: Error) => reject(err));
+    });
+
+    this.dataStore.kitsuById = newKitsuById;
     logger.info(
-      `[${DATA_SOURCES.kitsuImdb.name}] Loaded and indexed ${this.dataStore.kitsuById.size} valid entries in ${getTimeTakenSincePoint(start)}`
+      `[${DATA_SOURCES.kitsuImdb.name}] Loaded and indexed ${newKitsuById.size} valid entries in ${getTimeTakenSincePoint(start)}`
     );
   }
 
   private async loadExtendedAnitraktMovies(): Promise<void> {
     const start = Date.now();
-    const fileContents = await this.readLocalFile(
-      DATA_SOURCES.anitraktMovies.filePath
-    );
-    if (!fileContents)
+    const filePath = DATA_SOURCES.anitraktMovies.filePath;
+    
+    if (!(await this.fileExists(filePath))) {
       throw new Error(DATA_SOURCES.anitraktMovies.name + ' file not found');
-
-    const data = JSON.parse(fileContents);
-    if (!Array.isArray(data))
-      throw new Error(
-        DATA_SOURCES.anitraktMovies.name + ' data must be an array'
-      );
-
-    const validEntries = this.validateEntries(
-      data,
-      validateExtendedAnitraktMovieEntry
-    );
-
-    const newExtendedAnitraktMoviesById: ExtendedAnitraktMoviesIdMap =
-      new Map();
-
-    for (const entry of validEntries) {
-      newExtendedAnitraktMoviesById.set(entry.myanimelist.id, entry);
     }
+
+    const newExtendedAnitraktMoviesById: ExtendedAnitraktMoviesIdMap = new Map();
+    let validCount = 0;
+
+    await new Promise<void>((resolve, reject) => {
+      const pipeline = chain([
+        createReadStream(filePath),
+        parser(),
+        streamArray(),
+      ]);
+
+      pipeline.on('data', ({ value }: { value: unknown }) => {
+        const entry = validateExtendedAnitraktMovieEntry(value);
+        if (entry) {
+          validCount++;
+          newExtendedAnitraktMoviesById.set(entry.myanimelist.id, entry);
+        }
+      });
+
+      pipeline.on('end', () => resolve());
+      pipeline.on('error', (err: Error) => reject(err));
+    });
+
     this.dataStore.extendedAnitraktMoviesById = newExtendedAnitraktMoviesById;
     logger.info(
-      `[${DATA_SOURCES.anitraktMovies.name}] Loaded and indexed ${validEntries.length} valid entries in ${getTimeTakenSincePoint(start)}`
+      `[${DATA_SOURCES.anitraktMovies.name}] Loaded and indexed ${validCount} valid entries in ${getTimeTakenSincePoint(start)}`
     );
   }
 
   private async loadExtendedAnitraktTv(): Promise<void> {
     const start = Date.now();
-    const fileContents = await this.readLocalFile(
-      DATA_SOURCES.anitraktTv.filePath
-    );
-    if (!fileContents)
+    const filePath = DATA_SOURCES.anitraktTv.filePath;
+    
+    if (!(await this.fileExists(filePath))) {
       throw new Error(DATA_SOURCES.anitraktTv.name + ' file not found');
-
-    const data = JSON.parse(fileContents);
-    if (!Array.isArray(data))
-      throw new Error(DATA_SOURCES.anitraktTv.name + ' data must be an array');
-
-    const validEntries = this.validateEntries(
-      data,
-      validateExtendedAnitraktTvEntry
-    );
+    }
 
     const newExtendedAnitraktTvById: ExtendedAnitraktTvIdMap = new Map();
+    let validCount = 0;
 
-    for (const entry of validEntries) {
-      newExtendedAnitraktTvById.set(entry.myanimelist.id, entry);
-    }
+    await new Promise<void>((resolve, reject) => {
+      const pipeline = chain([
+        createReadStream(filePath),
+        parser(),
+        streamArray(),
+      ]);
+
+      pipeline.on('data', ({ value }: { value: unknown }) => {
+        const entry = validateExtendedAnitraktTvEntry(value);
+        if (entry) {
+          validCount++;
+          newExtendedAnitraktTvById.set(entry.myanimelist.id, entry);
+        }
+      });
+
+      pipeline.on('end', () => resolve());
+      pipeline.on('error', (err: Error) => reject(err));
+    });
+
     this.dataStore.extendedAnitraktTvById = newExtendedAnitraktTvById;
     logger.info(
-      `[${DATA_SOURCES.anitraktTv.name}] Loaded and indexed ${validEntries.length} valid entries in ${getTimeTakenSincePoint(start)}`
+      `[${DATA_SOURCES.anitraktTv.name}] Loaded and indexed ${validCount} valid entries in ${getTimeTakenSincePoint(start)}`
     );
   }
 

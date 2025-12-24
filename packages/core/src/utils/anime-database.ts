@@ -17,7 +17,7 @@ import { parser } from 'stream-json';
 import { streamArray } from 'stream-json/streamers/StreamArray.js';
 import { streamObject } from 'stream-json/streamers/StreamObject.js';
 import { pick } from 'stream-json/filters/Pick.js';
-import { chain } from 'stream-chain';
+import chain from 'stream-chain';
 
 const logger = createLogger('anime-database');
 
@@ -764,7 +764,7 @@ export class AnimeDatabase {
     let validCount = 0;
 
     await new Promise<void>((resolve, reject) => {
-      const pipeline = chain([
+      const pipeline = new chain([
         createReadStream(filePath),
         parser(),
         streamArray(),
@@ -817,7 +817,7 @@ export class AnimeDatabase {
     let validCount = 0;
 
     await new Promise<void>((resolve, reject) => {
-      const pipeline = chain([
+      const pipeline = new chain([
         createReadStream(filePath),
         parser(),
         pick({ filter: 'data' }),
@@ -881,7 +881,7 @@ export class AnimeDatabase {
     const newKitsuById: KitsuIdMap = new Map();
 
     await new Promise<void>((resolve, reject) => {
-      const pipeline = chain([
+      const pipeline = new chain([
         createReadStream(filePath),
         parser(),
         streamObject(),
@@ -920,7 +920,7 @@ export class AnimeDatabase {
     let validCount = 0;
 
     await new Promise<void>((resolve, reject) => {
-      const pipeline = chain([
+      const pipeline = new chain([
         createReadStream(filePath),
         parser(),
         streamArray(),
@@ -956,7 +956,7 @@ export class AnimeDatabase {
     let validCount = 0;
 
     await new Promise<void>((resolve, reject) => {
-      const pipeline = chain([
+      const pipeline = new chain([
         createReadStream(filePath),
         parser(),
         streamArray(),

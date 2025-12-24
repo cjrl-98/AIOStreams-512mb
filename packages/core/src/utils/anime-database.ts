@@ -78,6 +78,10 @@ const DATA_SOURCES = {
   },
 } as const;
 
+// Priority ID types for memory-constrained environments (512MB)
+// Only index on the most commonly used ID types to reduce memory usage
+const PRIORITY_ID_TYPES: IdType[] = ['malId', 'anilistId', 'kitsuId', 'imdbId'];
+
 const extractIdFromUrl: {
   [K in
     | 'anidbId'
@@ -763,7 +767,7 @@ export class AnimeDatabase {
     }
 
     const newMappingsById: MappingIdMap = new Map();
-    for (const idType of ID_TYPES) {
+    for (const idType of PRIORITY_ID_TYPES) {
       newMappingsById.set(idType, new Map());
     }
 
@@ -780,7 +784,7 @@ export class AnimeDatabase {
         const entry = validateMappingEntry(value);
         if (entry) {
           validCount++;
-          for (const idType of ID_TYPES) {
+          for (const idType of PRIORITY_ID_TYPES) {
             const idValue = entry[idType];
             if (idValue !== undefined && idValue !== null) {
               const existingEntry = newMappingsById.get(idType)?.get(idValue);
@@ -811,12 +815,10 @@ export class AnimeDatabase {
     }
 
     const newManamiById: ManamiIdMap = new Map();
-    const idTypes = Object.keys(extractIdFromUrl) as Exclude<
-      IdType,
-      'traktId'
-    >[];
+    // Only use priority ID extractors for memory efficiency
+    const priorityIdTypes = ['malId', 'anilistId', 'kitsuId'] as const;
 
-    for (const idType of idTypes) {
+    for (const idType of priorityIdTypes) {
       newManamiById.set(idType, new Map());
     }
 
@@ -835,21 +837,17 @@ export class AnimeDatabase {
         if (entry) {
           validCount++;
           for (const sourceUrl of entry.sources) {
-            for (const idType of idTypes) {
+            for (const idType of priorityIdTypes) {
               const idExtractor = extractIdFromUrl[idType];
               if (idExtractor) {
                 const idValue = idExtractor(sourceUrl);
                 if (idValue) {
                   const existingEntry = newManamiById.get(idType)?.get(idValue);
                   if (!existingEntry) {
+                    // Always use minimized entry to reduce memory
                     newManamiById
                       .get(idType)
-                      ?.set(
-                        idValue,
-                        Env.ANIME_DB_LEVEL_OF_DETAIL === 'required'
-                          ? this.minimiseManamiEntry(entry)
-                          : entry
-                      );
+                      ?.set(idValue, this.minimiseManamiEntry(entry));
                   }
                 }
               }
